@@ -1,8 +1,8 @@
-﻿using ClassifiedAds.Application.FileEntries.DTOs;
-using ClassifiedAds.CrossCuttingConcerns.Exceptions;
+﻿using ClassifiedAds.CrossCuttingConcerns.Exceptions;
 using ClassifiedAds.Domain.Identity;
 using ClassifiedAds.Infrastructure.Configuration;
 using ClassifiedAds.Infrastructure.HealthChecks;
+using ClassifiedAds.Infrastructure.HostedServices;
 using ClassifiedAds.Infrastructure.Identity;
 using ClassifiedAds.Infrastructure.Logging;
 using ClassifiedAds.Infrastructure.Monitoring;
@@ -13,7 +13,6 @@ using ClassifiedAds.WebMVC.Configurations;
 using ClassifiedAds.WebMVC.Filters;
 using ClassifiedAds.WebMVC.HttpMessageHandlers;
 using ClassifiedAds.WebMVC.Middleware;
-using HealthChecks.UI.Client;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
@@ -139,7 +138,7 @@ services.AddHttpClient(string.Empty)
 
 services.AddCaches(appSettings.Caching);
 
-var healthChecksBuilder = services.AddHealthChecks()
+services.AddHealthChecks()
     .AddSqlServer(connectionString: appSettings.ConnectionStrings.ClassifiedAds,
         healthQuery: "SELECT 1;",
         name: "Sql Server",
@@ -150,21 +149,15 @@ var healthChecksBuilder = services.AddHealthChecks()
     .AddHttp(appSettings.ResourceServer.Endpoint,
         name: "Resource (Web API) Server",
         failureStatus: HealthStatus.Degraded)
-    .AddStorageManagerHealthCheck(appSettings.Storage)
-    .AddMessageBusHealthCheck(appSettings.MessageBroker);
+    .AddStorageManagerHealthCheck(appSettings.Storage);
 
-services.AddHealthChecksUI(setupSettings: setup =>
-{
-    setup.AddHealthCheckEndpoint("Basic Health Check", $"{appSettings.CurrentUrl}/healthz");
-    setup.DisableDatabaseMigrations();
-}).AddInMemoryStorage();
+services.Configure<HealthChecksBackgroundServiceOptions>(x => x.Interval = TimeSpan.FromMinutes(10));
+services.AddHostedService<HealthChecksBackgroundService>();
 
 services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
 services.AddScoped<ICurrentUser, CurrentWebUser>();
 
 services.AddStorageManager(appSettings.Storage);
-services.AddMessageBusSender<FileUploadedEvent>(appSettings.MessageBroker);
-services.AddMessageBusSender<FileDeletedEvent>(appSettings.MessageBroker);
 
 services.AddFeatureManagement();
 
@@ -208,7 +201,7 @@ app.UseMonitoringServices(appSettings.Monitoring);
 app.UseHealthChecks("/healthz", new HealthCheckOptions
 {
     Predicate = _ => true,
-    ResponseWriter = UIResponseWriter.WriteHealthCheckUIResponse,
+    ResponseWriter = HealthChecksResponseWriter.WriteReponse,
     ResultStatusCodes =
     {
         [HealthStatus.Healthy] = StatusCodes.Status200OK,
@@ -216,8 +209,6 @@ app.UseHealthChecks("/healthz", new HealthCheckOptions
         [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
     },
 });
-
-app.UseHealthChecksUI(); // /healthchecks-ui#/healthchecks
 
 app.MapDefaultControllerRoute();
 app.MapClassifiedAdsHubs();

@@ -1,9 +1,12 @@
-﻿using ClassifiedAds.CrossCuttingConcerns.Csv;
+﻿using ClassifiedAds.Application.ConfigurationEntries.DTOs;
+using ClassifiedAds.Application.Products.DTOs;
+using ClassifiedAds.CrossCuttingConcerns.Csv;
 using ClassifiedAds.CrossCuttingConcerns.Excel;
-using ClassifiedAds.Domain.Entities;
 using ClassifiedAds.Domain.Identity;
 using ClassifiedAds.Infrastructure.Csv;
 using ClassifiedAds.Infrastructure.Excel.ClosedXML;
+using ClassifiedAds.Infrastructure.HealthChecks;
+using ClassifiedAds.Infrastructure.HostedServices;
 using ClassifiedAds.Infrastructure.Identity;
 using ClassifiedAds.Infrastructure.Localization;
 using ClassifiedAds.Infrastructure.Logging;
@@ -19,10 +22,12 @@ using ClassifiedAds.WebAPI.Tenants;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -220,18 +225,31 @@ services.AddSwaggerGen(setupAction =>
 
 services.AddCaches(appSettings.Caching);
 
+services.AddHealthChecks()
+    .AddSqlServer(connectionString: appSettings.ConnectionStrings.ClassifiedAds,
+        healthQuery: "SELECT 1;",
+        name: "Sql Server",
+        failureStatus: HealthStatus.Degraded)
+    .AddHttp(appSettings.IdentityServerAuthentication.Authority,
+        name: "Identity Server",
+        failureStatus: HealthStatus.Degraded)
+    .AddStorageManagerHealthCheck(appSettings.Storage);
+
+services.Configure<HealthChecksBackgroundServiceOptions>(x => x.Interval = TimeSpan.FromMinutes(10));
+services.AddHostedService<HealthChecksBackgroundService>();
+
 services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
 services.AddScoped<ICurrentUser, CurrentWebUser>();
 
 services.AddStorageManager(appSettings.Storage);
-services.AddHtmlGenerator();
-services.AddDinkToPdfConverter();
+services.AddHtmlWriters();
+services.AddDinkToPdfWriters();
 services.AddClassifiedAdsLocalization();
 
-services.AddScoped(typeof(ICsvReader<>), typeof(CsvReader<>));
-services.AddScoped(typeof(ICsvWriter<>), typeof(CsvWriter<>));
-services.AddScoped<IExcelReader<List<ConfigurationEntry>>, ConfigurationEntryExcelReader>();
-services.AddScoped<IExcelWriter<List<ConfigurationEntry>>, ConfigurationEntryExcelWriter>();
+services.AddScoped<ICsvReader<ImportProductsFromCsv>, ImportProductsFromCsvHandler>();
+services.AddScoped<ICsvWriter<ExportProductsToCsv>, ExportProductsToCsvHandler>();
+services.AddScoped<IExcelReader<ImportConfigurationEntriesFromExcel>, ImportConfigurationEntriesFromExcelHandler>();
+services.AddScoped<IExcelWriter<ExportConfigurationEntriesToExcel>, ExportConfigurationEntriesToExcelHandler>();
 
 // Configure the HTTP request pipeline.
 var app = builder.Build();
@@ -282,6 +300,18 @@ app.UseAuthorization();
 app.UseRateLimiter();
 
 app.UseMonitoringServices(appSettings.Monitoring);
+
+app.UseHealthChecks("/healthz", new HealthCheckOptions
+{
+    Predicate = _ => true,
+    ResponseWriter = HealthChecksResponseWriter.WriteReponse,
+    ResultStatusCodes =
+    {
+        [HealthStatus.Healthy] = StatusCodes.Status200OK,
+        [HealthStatus.Degraded] = StatusCodes.Status500InternalServerError,
+        [HealthStatus.Unhealthy] = StatusCodes.Status503ServiceUnavailable,
+    },
+});
 
 app.MapControllers();
 app.MapHub<NotificationHub>("/hubs/notification").RequireCors("SignalRHubs");
